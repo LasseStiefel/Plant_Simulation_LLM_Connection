@@ -5,9 +5,7 @@ import subprocess
 
 BASE_DIR = Path(__file__).resolve().parent
 program = r"C:\Program Files\Siemens\Tecnomatix Plant Simulation 2504\PlantSimulation.exe"
-file_path = BASE_DIR / "autoexecute_test.spp"
-
-
+file_path = BASE_DIR / "LLM_Model_V2.spp"
 
 PARAMETERS_PATH = BASE_DIR / "model_parameters.json"
 RESULTS_PATH = BASE_DIR / "model_results.json"
@@ -32,13 +30,10 @@ def _load_parameters() -> dict:
 
     return parameters
 
-
-def _get_param() -> int: #dict
+def _get_param() -> dict: #dict
     parameters = _load_parameters()
-    Store1ProcTime = parameters["Store1ProcTime"]
-    Store2ProcTime = parameters["Store2ProcTime"]
 
-    return Store1ProcTime, Store2ProcTime
+    return parameters
 
 def _open_model(updated_json: dict, waiter=None) -> None:
     global _ACTIVE_WAITER
@@ -50,8 +45,6 @@ def _open_model(updated_json: dict, waiter=None) -> None:
 
     # Open Model
     subprocess.Popen([program, str(file_path)])
-    
-
 
 def _send_sim_results(simulation_results: dict) -> None:
     global _ACTIVE_WAITER

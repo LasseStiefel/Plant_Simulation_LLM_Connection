@@ -1,4 +1,7 @@
 {
-    "Store1ProcTime": 5,
-    "Store2ProcTime": 44
+    "root.Station1.ProcTime": 12,
+    "root.Station2.ProcTime": 60,
+    "root.AssemblyStation.ProcTime": 60,
+    "root.Station3.ProcTime": 40,
+    "root.Station3.YDim": 2
 }

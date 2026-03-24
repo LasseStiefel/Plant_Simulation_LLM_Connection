@@ -1,15 +1,15 @@
-# basic_agent_json_edit_existing.py
-
 import asyncio
 import json
+import os
+from copy import deepcopy
 from pathlib import Path
-from pydantic import BaseModel, Field
+from typing import Any
+
 from agents import Agent, Runner
 from dotenv import load_dotenv
-import os
+from pydantic import BaseModel, Field
 
 from model_handling import RESULTS_PATH, _open_model
-
 
 load_dotenv()
 
@@ -18,23 +18,46 @@ print(api_key is not None)
 
 
 BASE_DIR = Path(__file__).resolve().parent
-JSON_FILE = BASE_DIR / "plant_inputs.json"
+PARAMETER_MAPPING_FILE = BASE_DIR / "parameter_mapping.json"
 SIMULATION_TIMEOUT_SECONDS = 300
 
-class PlantInputs(BaseModel):
-    Store1ProcTime: int = Field(description="Processing time for store 1 in seconds")
-    Store2ProcTime: int = Field(description="Processing time for store 2 in seconds")
+JsonScalar = int | float | str | bool | None
+
+
+class ParameterDefinition(BaseModel):
+    description: str
+    route: str
+    format: str
+    value: JsonScalar
+
+
+class ParameterValueUpdate(BaseModel):
+    name: str = Field(description="Exact parameter name from the mapping JSON")
+    value: JsonScalar = Field(description="New value for that parameter")
+
+
+class ParameterUpdateResponse(BaseModel):
+    updates: list[ParameterValueUpdate] = Field(
+        default_factory=list,
+        description="Only include parameters whose values should change",
+    )
 
 
 agent = Agent(
     name="Plant Simulation Input Agent",
     instructions=(
-        "You are a helper for Siemens Plant Simulation. "
-        "Read the user's request and return updated integer values for "
-        "Store1ProcTime and Store2ProcTime only. "
-        "If the user mentions only one variable, keep the other at its existing/default value."
+        "You update Siemens Plant Simulation parameters. "
+        "You will receive a JSON mapping where each top-level key is a parameter name. "
+        "Each parameter includes description, route, format, and value. "
+        "Use description and format to understand how each value should be written. "
+        "Return a JSON object with one field named updates. "
+        "updates must be a list of objects with name and value. "
+        "Use the exact parameter name from the mapping JSON in name. "
+        "Only include parameters whose values should change. "
+        "If the user does not mention a parameter, do not include it in updates. "
+        "Use values that match the format."
     ),
-    output_type=PlantInputs,
+    output_type=ParameterUpdateResponse,
     model="gpt-5.4-mini",
 )
 response_agent = Agent(
@@ -47,17 +70,88 @@ response_agent = Agent(
     model="gpt-5.4-mini",
 )
 
-def load_existing_json(filepath: Path) -> dict:
+def load_parameter_mapping(filepath: Path) -> dict:
     if filepath.exists():
         return json.loads(filepath.read_text(encoding="utf-8"))
-    return {
-        "Store1ProcTime": 60,
-        "Store2ProcTime": 60
-    }
+    raise FileNotFoundError(f"Parameter mapping file not found: {filepath}")
+
+def _coerce_value(candidate_value: Any, default_value: JsonScalar) -> JsonScalar:
+    if isinstance(default_value, bool):
+        if isinstance(candidate_value, bool):
+            return candidate_value
+        if isinstance(candidate_value, str):
+            lowered = candidate_value.strip().lower()
+            if lowered in {"true", "false"}:
+                return lowered == "true"
+        return default_value
+
+    if isinstance(default_value, int):
+        if isinstance(candidate_value, bool):
+            return default_value
+        if isinstance(candidate_value, int):
+            return candidate_value
+        if isinstance(candidate_value, float) and candidate_value.is_integer():
+            return int(candidate_value)
+        if isinstance(candidate_value, str):
+            stripped = candidate_value.strip()
+            if stripped.lstrip("+-").isdigit():
+                return int(stripped)
+        return default_value
+
+    if isinstance(default_value, float):
+        if isinstance(candidate_value, (int, float)) and not isinstance(candidate_value, bool):
+            return float(candidate_value)
+        if isinstance(candidate_value, str):
+            try:
+                return float(candidate_value.strip())
+            except ValueError:
+                return default_value
+        return default_value
+
+    if isinstance(default_value, str):
+        if candidate_value is None:
+            return default_value
+        if isinstance(candidate_value, (str, int, float, bool)):
+            return str(candidate_value)
+        return default_value
+
+    if default_value is None and isinstance(candidate_value, (str, int, float, bool)):
+        return candidate_value
+
+    return default_value
 
 
-def save_json(filepath: Path, data: dict) -> None:
-    filepath.write_text(json.dumps(data, indent=4), encoding="utf-8")
+def normalize_parameter_mapping(base_mapping: dict, candidate_mapping: dict) -> dict:
+    updated_mapping = deepcopy(base_mapping)
+
+    for candidate_definition in candidate_mapping.get("updates", []):
+        if not isinstance(candidate_definition, dict):
+            continue
+
+        parameter_name = candidate_definition.get("name")
+        if parameter_name not in base_mapping:
+            continue
+
+        base_definition = base_mapping[parameter_name]
+        updated_mapping[parameter_name]["value"] = _coerce_value(
+            candidate_definition.get("value"),
+            base_definition.get("value"),
+        )
+
+    return updated_mapping
+
+
+def build_plant_parameter_payload(parameter_mapping: dict) -> dict:
+    plant_parameters = {}
+
+    for parameter_definition in parameter_mapping.values():
+        route = parameter_definition.get("route")
+        if not route:
+            continue
+
+        plant_parameters[route] = parameter_definition.get("value")
+
+    return plant_parameters
 
 async def wait_for_simulation_results(timeout_seconds: int) -> dict | None:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
@@ -74,22 +168,25 @@ async def wait_for_simulation_results(timeout_seconds: int) -> dict | None:
     return None
 
 async def main() -> str:
-    current_data = load_existing_json(JSON_FILE)
+    current_mapping = load_parameter_mapping(PARAMETER_MAPPING_FILE)
     user_prompt = input("Ask for simulation inputs: ")
 
     edit_prompt = (
-        f"Current JSON values are:\n{json.dumps(current_data, indent=4)}\n\n"
-        f"User request:\n{user_prompt}"
+        f"Parameter mapping JSON:\n{json.dumps(current_mapping, indent=4)}\n\n"
+        f"User request:\n{user_prompt}\n\n"
+        "Return only the updates list."
     )
 
     print("Calling Agent")
     edit_result = await Runner.run(agent, edit_prompt)
-    updated = edit_result.final_output.model_dump()
-    print("Updating Json")
-    save_json(JSON_FILE, updated)
+    updated_mapping = normalize_parameter_mapping(
+        current_mapping,
+        edit_result.final_output.model_dump(),
+    )
+    plant_parameters = build_plant_parameter_payload(updated_mapping)
 
-    print("Opening Model")
-    _open_model(updated)
+    print("Writing model_parameters.json and opening model")
+    _open_model(plant_parameters)
 
 
     results = await wait_for_simulation_results(SIMULATION_TIMEOUT_SECONDS)
@@ -98,7 +195,8 @@ async def main() -> str:
     
     response_prompt = (
         f"User request:\n{user_prompt}\n\n"
-        f"Updated inputs:\n{json.dumps(updated, indent=4)}\n\n"
+        f"Updated parameter mapping:\n{json.dumps(updated_mapping, indent=4)}\n\n"
+        f"Plant parameter payload:\n{json.dumps(plant_parameters, indent=4)}\n\n"
         f"Simulation results:\n{json.dumps(results, indent=4)}\n\n"
         "Reply to the user in one short sentence. Mention the line_output."
     )

@@ -1,14 +1,13 @@
 import asyncio
 import json
-from copy import deepcopy
 from pathlib import Path
-from typing import Any
 
 from agents import Agent, Runner
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from model_handling import PARAMETERS_PATH, RESULTS_PATH, _open_model
+from session import JsonScalar, PlantSimulationSession, format_conversation_history
 
 load_dotenv()
 
@@ -16,395 +15,125 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 PARAMETER_MAPPING_FILE = BASE_DIR / "parameter_mapping.json"
 SIMULATION_TIMEOUT_SECONDS = 300
-RUN_SIMULATION_COMMANDS = (
-    "run simulation",
-    "start simulation",
-    "run the simulation",
-    "start the simulation",
-    "run model",
-    "start model",
-    "run the model",
-    "start the model",
-    "execute simulation",
-    "execute the simulation",
-)
-RUN_SIMULATION_PREFIXES = ("", "please ")
-RUN_SIMULATION_JOINERS = (" and ", " then ", "; ")
-RUN_SIMULATION_NEGATIONS = (
-    "don't run",
-    "do not run",
-    "dont run",
-    "not run",
-    "not yet",
-    "wait",
-    "hold off",
-    "without running",
-)
-EXIT_COMMANDS = {"exit", "quit", "bye"}
-
-JsonScalar = int | float | str | bool | None
-
-
-class ParameterDefinition(BaseModel):
-    description: str
-    route: str
-    format: str
-    value: JsonScalar
 
 
 class ParameterValueUpdate(BaseModel):
     name: str = Field(description="Exact parameter name from the mapping JSON")
-    value: JsonScalar = Field(description="New value for that parameter")
+    value: JsonScalar = Field(description="The new staged value for that parameter")
 
 
-class ParameterUpdateResponse(BaseModel):
+class TurnResponse(BaseModel):
+    reply: str = Field(description="Natural conversational reply to the user")
     updates: list[ParameterValueUpdate] = Field(
         default_factory=list,
-        description="Only include parameters whose values should change",
+        description="Only include parameters whose values should change in this turn",
+    )
+    should_run: bool = Field(
+        description="True only when the user is clearly asking to run the simulation now",
     )
 
 
-agent = Agent(
-    name="Plant Simulation Input Agent",
+turn_agent = Agent(
+    name="Plant Simulation Turn Agent",
     instructions=(
-        "You update Siemens Plant Simulation parameters. "
-        "You will receive a JSON mapping where each top-level key is a parameter name. "
-        "Each parameter includes description, route, format, and value. "
-        "Use description and format to understand how each value should be written. "
-        "Return a JSON object with one field named updates. "
-        "updates must be a list of objects with name and value. "
-        "Use the exact parameter name from the mapping JSON in name. "
-        "Only include parameters whose values should change. "
-        "If the user does not mention a parameter, do not include it in updates. "
-        "Use values that match the format."
+        "You are helping a user configure a Siemens Plant Simulation model through chat. "
+        "You will receive recent conversation, the current pending parameter mapping, the latest user message, and optionally the most recent simulation context. "
+        "Each parameter in the mapping includes description, format, route, and current value. "
+        "Use this information to answer questions naturally, stage value changes, answer questions about the most recent simulation result when context is provided, and decide whether the simulation should run now. "
+        "Return three things: reply, updates, and should_run. "
+        "Write reply in plain natural prose and keep it brief for simple questions. "
+        "Only include parameters in updates when their value should change in this turn. "
+        "Use the exact parameter names from the mapping JSON. "
+        "Set should_run to true only when the user clearly wants to start the simulation now or is clearly done configuring and asking to proceed. "
+        "Do not run the simulation on every user input. "
+        "If you are unsure whether they want to run now, ask them directly in reply and set should_run to false. "
+        "When the user is still exploring values or asking questions, keep should_run false. "
+        "When the user asks about the most recent simulation result, answer from that context if it is provided. "
+        "Avoid markdown-heavy formatting for simple answers."
     ),
-    output_type=ParameterUpdateResponse,
+    output_type=TurnResponse,
     model="gpt-5.4-mini",
 )
-response_agent = Agent(
-    name="Plant Simulation Response Agent",
+
+result_summary_agent = Agent(
+    name="Plant Simulation Result Summary Agent",
     instructions=(
-        "You explain Plant Simulation results to the user. "
-        "Use the simulation results provided. "
-        "Reply briefly and clearly. Mention the value of line_output."
-    ),
-    model="gpt-5.4-mini",
-)
-conversation_agent = Agent(
-    name="Plant Simulation Conversation Agent",
-    instructions=(
-        "You help the user inspect and stage Siemens Plant Simulation parameter changes before a "
-        "simulation run. "
-        "You will receive the current pending parameter mapping and recent conversation. "
-        "Answer questions about current values, available parameters, and what each parameter can "
-        "change based on its description and format. "
-        "If the user has updated values, acknowledge the new pending values. "
-        "Do not say the simulation has run unless simulation results are explicitly provided. "
-        "Use natural conversational prose. "
-        "Prefer 1 to 3 short sentences for simple questions. "
-        "Do not use markdown bullets, bold text, or headings unless the user explicitly asks for a list. "
-        "If the user asks about one parameter, answer only that question directly. "
-        "Only mention current pending values when the user asks for them or when a value changed in this turn. "
-        "Only mention 'run simulation' when it is relevant, such as after the user changes a value or asks how to start the model. "
-        "Reply briefly, clearly, and naturally."
+        "You explain finished Plant Simulation results to the user in natural prose. "
+        "Use the user's request and the recent conversation to choose the right level of detail. "
+        "If the user asks for more explanation, provide more explanation instead of a fixed short template. "
+        "Mention the value of line_output when available, but do not answer with labels or snippets like 'output = 560'. "
+        "Do not use markdown bold, bullet points, or code formatting unless the user asks for them. "
+        "Connect the result to the configured parameters when that helps answer the user's question. "
+        "If only limited simulation metrics are available, say that clearly instead of inventing details."
     ),
     model="gpt-5.4-mini",
 )
 
-def load_parameter_mapping(filepath: Path) -> dict:
-    if filepath.exists():
-        return json.loads(filepath.read_text(encoding="utf-8"))
-    raise FileNotFoundError(f"Parameter mapping file not found: {filepath}")
+
+async def run_turn_agent(
+    conversation_history: list[dict[str, str]],
+    pending_mapping: dict,
+    user_prompt: str,
+    last_simulation_context: dict | None,
+) -> dict:
+    prompt = (
+        f"Recent conversation:\n{format_conversation_history(conversation_history)}\n\n"
+        f"Current pending parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
+        f"Most recent simulation context:\n{json.dumps(last_simulation_context, indent=4) if last_simulation_context else 'None'}\n\n"
+        f"Latest user request:\n{user_prompt}"
+    )
+    result = await Runner.run(turn_agent, prompt)
+    return result.final_output.model_dump()
 
 
-def load_current_parameter_mapping(mapping_path: Path, parameters_path: Path) -> dict:
-    current_mapping = load_parameter_mapping(mapping_path)
-    if not parameters_path.exists():
-        return current_mapping
-
-    try:
-        current_parameters = json.loads(parameters_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return current_mapping
-
-    updated_mapping = deepcopy(current_mapping)
-    for parameter_definition in updated_mapping.values():
-        route = parameter_definition.get("route")
-        if route not in current_parameters:
-            continue
-
-        parameter_definition["value"] = _coerce_value(
-            current_parameters.get(route),
-            parameter_definition.get("value"),
-        )
-
-    return updated_mapping
+async def summarize_results(
+    conversation_history: list[dict[str, str]],
+    user_prompt: str,
+    pending_mapping: dict,
+    plant_parameters: dict,
+    results: dict,
+    initial_reply: str,
+) -> str:
+    prompt = (
+        f"Recent conversation:\n{format_conversation_history(conversation_history)}\n\n"
+        f"User request:\n{user_prompt}\n\n"
+        f"Assistant reply before running:\n{initial_reply}\n\n"
+        f"Updated parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
+        f"Plant parameter payload:\n{json.dumps(plant_parameters, indent=4)}\n\n"
+        f"Simulation results:\n{json.dumps(results, indent=4)}"
+    )
+    result = await Runner.run(result_summary_agent, prompt)
+    return result.final_output
 
 
-def _coerce_value(candidate_value: Any, default_value: JsonScalar) -> JsonScalar:
-    if isinstance(default_value, bool):
-        if isinstance(candidate_value, bool):
-            return candidate_value
-        if isinstance(candidate_value, str):
-            lowered = candidate_value.strip().lower()
-            if lowered in {"true", "false"}:
-                return lowered == "true"
-        return default_value
-
-    if isinstance(default_value, int):
-        if isinstance(candidate_value, bool):
-            return default_value
-        if isinstance(candidate_value, int):
-            return candidate_value
-        if isinstance(candidate_value, float) and candidate_value.is_integer():
-            return int(candidate_value)
-        if isinstance(candidate_value, str):
-            stripped = candidate_value.strip()
-            if stripped.lstrip("+-").isdigit():
-                return int(stripped)
-        return default_value
-
-    if isinstance(default_value, float):
-        if isinstance(candidate_value, (int, float)) and not isinstance(candidate_value, bool):
-            return float(candidate_value)
-        if isinstance(candidate_value, str):
-            try:
-                return float(candidate_value.strip())
-            except ValueError:
-                return default_value
-        return default_value
-
-    if isinstance(default_value, str):
-        if candidate_value is None:
-            return default_value
-        if isinstance(candidate_value, (str, int, float, bool)):
-            return str(candidate_value)
-        return default_value
-
-    if default_value is None and isinstance(candidate_value, (str, int, float, bool)):
-        return candidate_value
-
-    return default_value
+def create_session() -> PlantSimulationSession:
+    return PlantSimulationSession(
+        mapping_path=PARAMETER_MAPPING_FILE,
+        parameters_path=PARAMETERS_PATH,
+        results_path=RESULTS_PATH,
+        open_model=_open_model,
+        run_turn=run_turn_agent,
+        summarize_results=summarize_results,
+        timeout_seconds=SIMULATION_TIMEOUT_SECONDS,
+    )
 
 
-def normalize_parameter_mapping(base_mapping: dict, candidate_mapping: dict) -> dict:
-    updated_mapping = deepcopy(base_mapping)
-
-    for candidate_definition in candidate_mapping.get("updates", []):
-        if not isinstance(candidate_definition, dict):
-            continue
-
-        parameter_name = candidate_definition.get("name")
-        if parameter_name not in base_mapping:
-            continue
-
-        base_definition = base_mapping[parameter_name]
-        updated_mapping[parameter_name]["value"] = _coerce_value(
-            candidate_definition.get("value"),
-            base_definition.get("value"),
-        )
-
-    return updated_mapping
-
-
-def build_plant_parameter_payload(parameter_mapping: dict) -> dict:
-    plant_parameters = {}
-
-    for parameter_definition in parameter_mapping.values():
-        route = parameter_definition.get("route")
-        if not route:
-            continue
-
-        plant_parameters[route] = parameter_definition.get("value")
-
-    return plant_parameters
-
-
-def _format_updates_for_prompt(candidate_mapping: dict, parameter_mapping: dict) -> str:
-    updates = []
-    for candidate_definition in candidate_mapping.get("updates", []):
-        if not isinstance(candidate_definition, dict):
-            continue
-
-        parameter_name = candidate_definition.get("name")
-        if parameter_name not in parameter_mapping:
-            continue
-
-        value = _coerce_value(
-            candidate_definition.get("value"),
-            parameter_mapping[parameter_name].get("value"),
-        )
-        updates.append(
-            {
-                "name": parameter_name,
-                "value": value,
-                "format": parameter_mapping[parameter_name].get("format"),
-            }
-        )
-
-    if not updates:
-        return "No values were changed in this turn."
-
-    return json.dumps(updates, indent=4)
-
-
-def _format_conversation_history(conversation_history: list[dict[str, str]], limit: int = 8) -> str:
-    if not conversation_history:
-        return "No previous conversation."
-
-    formatted_lines = []
-    for message in conversation_history[-limit:]:
-        formatted_lines.append(f"{message['role'].title()}: {message['content']}")
-
-    return "\n".join(formatted_lines)
-
-
-def _normalize_command_text(text: str) -> str:
-    normalized_text = text.strip().lower()
-    for punctuation in ("?", "!", ".", ","):
-        normalized_text = normalized_text.replace(punctuation, " ")
-    return " ".join(normalized_text.split())
-
-
-def _should_run_simulation(user_prompt: str) -> bool:
-    normalized_prompt = _normalize_command_text(user_prompt)
-    if any(negation in normalized_prompt for negation in RUN_SIMULATION_NEGATIONS):
-        return False
-
-    for command in RUN_SIMULATION_COMMANDS:
-        if any(normalized_prompt.startswith(f"{prefix}{command}") for prefix in RUN_SIMULATION_PREFIXES):
-            return True
-        if any(f"{joiner}{command}" in normalized_prompt for joiner in RUN_SIMULATION_JOINERS):
-            return True
-
-    return False
-
-
-def _should_exit(user_prompt: str) -> bool:
-    return _normalize_command_text(user_prompt) in EXIT_COMMANDS
-
-
-class PlantSimulationSession:
-    def __init__(self) -> None:
-        self.pending_mapping = load_current_parameter_mapping(PARAMETER_MAPPING_FILE, PARAMETERS_PATH)
-        self.conversation_history: list[dict[str, str]] = []
-
-    def snapshot(self) -> dict:
-        return {
-            "pending_mapping": deepcopy(self.pending_mapping),
-            "history": deepcopy(self.conversation_history),
-        }
-
-    async def handle_message(self, user_prompt: str) -> dict:
-        user_prompt = user_prompt.strip()
-        if not user_prompt:
-            return {
-                "reply": "Please enter a message.",
-                "state": self.snapshot(),
-                "should_exit": False,
-                "ran_simulation": False,
-            }
-
-        if _should_exit(user_prompt):
-            assistant_reply = "Session ended."
-            self.conversation_history.append({"role": "user", "content": user_prompt})
-            self.conversation_history.append({"role": "assistant", "content": assistant_reply})
-            return {
-                "reply": assistant_reply,
-                "state": self.snapshot(),
-                "should_exit": True,
-                "ran_simulation": False,
-            }
-
-        recent_history = _format_conversation_history(self.conversation_history)
-        edit_prompt = (
-            f"Recent conversation:\n{recent_history}\n\n"
-            f"Current pending parameter mapping:\n{json.dumps(self.pending_mapping, indent=4)}\n\n"
-            f"Latest user request:\n{user_prompt}\n\n"
-            "Return only the updates list."
-        )
-
-        print("Calling Agent")
-        edit_result = await Runner.run(agent, edit_prompt)
-        edit_output = edit_result.final_output.model_dump()
-        self.pending_mapping = normalize_parameter_mapping(
-            self.pending_mapping,
-            edit_output,
-        )
-
-        ran_simulation = _should_run_simulation(user_prompt)
-        if ran_simulation:
-            plant_parameters = build_plant_parameter_payload(self.pending_mapping)
-
-            print("Writing model_parameters.json and opening model")
-            _open_model(plant_parameters)
-
-            results = await wait_for_simulation_results(SIMULATION_TIMEOUT_SECONDS)
-            if results is None:
-                assistant_reply = "The simulation did not return results."
-            else:
-                response_prompt = (
-                    f"User request:\n{user_prompt}\n\n"
-                    f"Updated parameter mapping:\n{json.dumps(self.pending_mapping, indent=4)}\n\n"
-                    f"Plant parameter payload:\n{json.dumps(plant_parameters, indent=4)}\n\n"
-                    f"Simulation results:\n{json.dumps(results, indent=4)}\n\n"
-                    "Reply to the user in one short sentence. Mention the line_output."
-                )
-
-                response_result = await Runner.run(response_agent, response_prompt)
-                assistant_reply = response_result.final_output
-        else:
-            conversation_prompt = (
-                f"Recent conversation:\n{recent_history}\n\n"
-                f"Current pending parameter mapping:\n{json.dumps(self.pending_mapping, indent=4)}\n\n"
-                f"Applied updates in this turn:\n{_format_updates_for_prompt(edit_output, self.pending_mapping)}\n\n"
-                f"Latest user request:\n{user_prompt}\n\n"
-                "Answer the user naturally. If values were updated in this turn, mention only the "
-                "relevant new values. If no values were updated, just answer the question directly."
-            )
-
-            response_result = await Runner.run(conversation_agent, conversation_prompt)
-            assistant_reply = response_result.final_output
-
-        self.conversation_history.append({"role": "user", "content": user_prompt})
-        self.conversation_history.append({"role": "assistant", "content": assistant_reply})
-        return {
-            "reply": assistant_reply,
-            "state": self.snapshot(),
-            "should_exit": False,
-            "ran_simulation": ran_simulation,
-        }
-
-
-async def wait_for_simulation_results(timeout_seconds: int) -> dict | None:
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-
-    while asyncio.get_running_loop().time() < deadline:
-        if RESULTS_PATH.is_file():
-            try:
-                return json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                pass
-
-        await asyncio.sleep(0.5)
-
-    return None
-
-async def main() -> str:
-    session = PlantSimulationSession()
-
-    print("You can inspect or change values first. Say 'run simulation' when you want to start the model. Type 'exit' to quit.")
+async def main() -> None:
+    session = create_session()
+    print("Ask about values, stage changes, and tell me when you want to run the simulation.")
 
     while True:
         user_prompt = input("Ask for simulation inputs: ").strip()
         if not user_prompt:
             continue
 
+        if user_prompt.lower() in {"exit", "quit", "bye"}:
+            print("Session ended.")
+            return
+
         result = await session.handle_message(user_prompt)
         print(result["reply"])
-        if result["should_exit"]:
-            return result["reply"]
 
 
 if __name__ == "__main__":
-    print(asyncio.run(main()))
+    asyncio.run(main())

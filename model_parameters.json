@@ -3,5 +3,5 @@
     "root.Station2.ProcTime": 100,
     "root.AssemblyStation.ProcTime": 100,
     "root.Station3.ProcTime": 100,
-    "root.Station3.YDim": 2
+    "root.Station3.YDim": 15
 }

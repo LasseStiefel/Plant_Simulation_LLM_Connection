@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from agent import PlantSimulationSession
+from agent import create_session
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,7 +17,7 @@ WEB_UI_DIR = BASE_DIR / "webui"
 class PlantChatServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler]):
         super().__init__(server_address, handler_class)
-        self.session = PlantSimulationSession()
+        self.session = create_session()
         self.session_lock = threading.Lock()
 
 

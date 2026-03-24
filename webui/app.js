@@ -153,11 +153,6 @@ async function sendMessage(message) {
     }
 
     renderState(payload.state);
-    if (payload.should_exit) {
-      setBusy(true, "Session ended");
-      return;
-    }
-
     setBusy(false, payload.ran_simulation ? "Simulation complete" : "Ready");
   } catch (error) {
     renderState({

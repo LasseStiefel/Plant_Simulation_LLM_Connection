@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -12,9 +11,6 @@ from pydantic import BaseModel, Field
 from model_handling import PARAMETERS_PATH, RESULTS_PATH, _open_model
 
 load_dotenv()
-
-api_key = os.getenv("OPENAI_API_KEY")
-print(api_key is not None)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -287,6 +283,99 @@ def _should_run_simulation(user_prompt: str) -> bool:
 def _should_exit(user_prompt: str) -> bool:
     return _normalize_command_text(user_prompt) in EXIT_COMMANDS
 
+
+class PlantSimulationSession:
+    def __init__(self) -> None:
+        self.pending_mapping = load_current_parameter_mapping(PARAMETER_MAPPING_FILE, PARAMETERS_PATH)
+        self.conversation_history: list[dict[str, str]] = []
+
+    def snapshot(self) -> dict:
+        return {
+            "pending_mapping": deepcopy(self.pending_mapping),
+            "history": deepcopy(self.conversation_history),
+        }
+
+    async def handle_message(self, user_prompt: str) -> dict:
+        user_prompt = user_prompt.strip()
+        if not user_prompt:
+            return {
+                "reply": "Please enter a message.",
+                "state": self.snapshot(),
+                "should_exit": False,
+                "ran_simulation": False,
+            }
+
+        if _should_exit(user_prompt):
+            assistant_reply = "Session ended."
+            self.conversation_history.append({"role": "user", "content": user_prompt})
+            self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+            return {
+                "reply": assistant_reply,
+                "state": self.snapshot(),
+                "should_exit": True,
+                "ran_simulation": False,
+            }
+
+        recent_history = _format_conversation_history(self.conversation_history)
+        edit_prompt = (
+            f"Recent conversation:\n{recent_history}\n\n"
+            f"Current pending parameter mapping:\n{json.dumps(self.pending_mapping, indent=4)}\n\n"
+            f"Latest user request:\n{user_prompt}\n\n"
+            "Return only the updates list."
+        )
+
+        print("Calling Agent")
+        edit_result = await Runner.run(agent, edit_prompt)
+        edit_output = edit_result.final_output.model_dump()
+        self.pending_mapping = normalize_parameter_mapping(
+            self.pending_mapping,
+            edit_output,
+        )
+
+        ran_simulation = _should_run_simulation(user_prompt)
+        if ran_simulation:
+            plant_parameters = build_plant_parameter_payload(self.pending_mapping)
+
+            print("Writing model_parameters.json and opening model")
+            _open_model(plant_parameters)
+
+            results = await wait_for_simulation_results(SIMULATION_TIMEOUT_SECONDS)
+            if results is None:
+                assistant_reply = "The simulation did not return results."
+            else:
+                response_prompt = (
+                    f"User request:\n{user_prompt}\n\n"
+                    f"Updated parameter mapping:\n{json.dumps(self.pending_mapping, indent=4)}\n\n"
+                    f"Plant parameter payload:\n{json.dumps(plant_parameters, indent=4)}\n\n"
+                    f"Simulation results:\n{json.dumps(results, indent=4)}\n\n"
+                    "Reply to the user in one short sentence. Mention the line_output."
+                )
+
+                response_result = await Runner.run(response_agent, response_prompt)
+                assistant_reply = response_result.final_output
+        else:
+            conversation_prompt = (
+                f"Recent conversation:\n{recent_history}\n\n"
+                f"Current pending parameter mapping:\n{json.dumps(self.pending_mapping, indent=4)}\n\n"
+                f"Applied updates in this turn:\n{_format_updates_for_prompt(edit_output, self.pending_mapping)}\n\n"
+                f"Latest user request:\n{user_prompt}\n\n"
+                "Answer the user naturally. If values were updated in this turn, mention only the "
+                "relevant new values. If no values were updated, just answer the question directly."
+            )
+
+            response_result = await Runner.run(conversation_agent, conversation_prompt)
+            assistant_reply = response_result.final_output
+
+        self.conversation_history.append({"role": "user", "content": user_prompt})
+        self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+        return {
+            "reply": assistant_reply,
+            "state": self.snapshot(),
+            "should_exit": False,
+            "ran_simulation": ran_simulation,
+        }
+
+
 async def wait_for_simulation_results(timeout_seconds: int) -> dict | None:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
 
@@ -302,8 +391,7 @@ async def wait_for_simulation_results(timeout_seconds: int) -> dict | None:
     return None
 
 async def main() -> str:
-    pending_mapping = load_current_parameter_mapping(PARAMETER_MAPPING_FILE, PARAMETERS_PATH)
-    conversation_history: list[dict[str, str]] = []
+    session = PlantSimulationSession()
 
     print("You can inspect or change values first. Say 'run simulation' when you want to start the model. Type 'exit' to quit.")
 
@@ -312,61 +400,10 @@ async def main() -> str:
         if not user_prompt:
             continue
 
-        if _should_exit(user_prompt):
-            return "Session ended."
-
-        recent_history = _format_conversation_history(conversation_history)
-        edit_prompt = (
-            f"Recent conversation:\n{recent_history}\n\n"
-            f"Current pending parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
-            f"Latest user request:\n{user_prompt}\n\n"
-            "Return only the updates list."
-        )
-
-        print("Calling Agent")
-        edit_result = await Runner.run(agent, edit_prompt)
-        edit_output = edit_result.final_output.model_dump()
-        pending_mapping = normalize_parameter_mapping(
-            pending_mapping,
-            edit_output,
-        )
-
-        if _should_run_simulation(user_prompt):
-            plant_parameters = build_plant_parameter_payload(pending_mapping)
-
-            print("Writing model_parameters.json and opening model")
-            _open_model(plant_parameters)
-
-            results = await wait_for_simulation_results(SIMULATION_TIMEOUT_SECONDS)
-            if results is None:
-                assistant_reply = "The simulation did not return results."
-            else:
-                response_prompt = (
-                    f"User request:\n{user_prompt}\n\n"
-                    f"Updated parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
-                    f"Plant parameter payload:\n{json.dumps(plant_parameters, indent=4)}\n\n"
-                    f"Simulation results:\n{json.dumps(results, indent=4)}\n\n"
-                    "Reply to the user in one short sentence. Mention the line_output."
-                )
-
-                response_result = await Runner.run(response_agent, response_prompt)
-                assistant_reply = response_result.final_output
-        else:
-            conversation_prompt = (
-                f"Recent conversation:\n{recent_history}\n\n"
-                f"Current pending parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
-                f"Applied updates in this turn:\n{_format_updates_for_prompt(edit_output, pending_mapping)}\n\n"
-                f"Latest user request:\n{user_prompt}\n\n"
-                "Answer the user naturally. If values were updated in this turn, mention only the "
-                "relevant new values. If no values were updated, just answer the question directly."
-            )
-
-            response_result = await Runner.run(conversation_agent, conversation_prompt)
-            assistant_reply = response_result.final_output
-
-        print(assistant_reply)
-        conversation_history.append({"role": "user", "content": user_prompt})
-        conversation_history.append({"role": "assistant", "content": assistant_reply})
+        result = await session.handle_message(user_prompt)
+        print(result["reply"])
+        if result["should_exit"]:
+            return result["reply"]
 
 
 if __name__ == "__main__":

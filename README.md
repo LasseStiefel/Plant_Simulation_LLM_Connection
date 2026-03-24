@@ -66,8 +66,10 @@ The sample result currently included in the repository is:
 
 ## Project Structure
 
-- `agent.py`: main entry point; handles conversation, staged updates, simulation launch, and result summarization
+- `agent.py`: shared chat/session logic plus the original terminal entry point
 - `model_handling.py`: writes model parameters, launches Plant Simulation, and stores simulation results
+- `web_ui.py`: lightweight local web server for the chat UI
+- `webui/`: static browser assets for the local chat UI
 - `parameter_mapping.json`: parameter definitions used as the LLM's editable-parameter context
 - `model_parameters.json`: route-to-value payload written immediately before a simulation run
 - `model_results.json`: latest simulation result
@@ -119,7 +121,25 @@ OPENAI_API_KEY=your_api_key_here
 
 ## How To Run
 
+### Browser UI
+
 From the project root:
+
+```powershell
+.\.venv\Scripts\python.exe web_ui.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The browser UI is chat-only on purpose. There is no separate run button yet. Type `run simulation` in the chat when you want to start the model.
+
+### Terminal UI
+
+You can still use the original terminal loop:
 
 ```powershell
 .\.venv\Scripts\python.exe agent.py
@@ -164,6 +184,8 @@ Questions such as `can we run simulation?` do not start the model. The simulatio
 `agent.py` reads `parameter_mapping.json` and builds the current pending parameter state.
 
 If `model_parameters.json` already exists, the pending state is initialized from those saved plant values so the conversation starts from the latest active settings rather than only the defaults.
+
+The same session logic is used by both the terminal mode and the local browser UI.
 
 ### 2. Update extraction
 
@@ -233,6 +255,7 @@ A response agent reads the simulation results and returns a short explanation th
 - `parameter_mapping.json` is the LLM-facing source of truth for parameter names, descriptions, formats, and default values.
 - `model_parameters.json` is the Plant Simulation-facing payload and currently uses the shape `{route: value}`.
 - Pending values are updated during the conversation, but `model_parameters.json` is only rewritten when the user explicitly starts a simulation run.
+- The local browser UI is intentionally minimal and keeps the interaction pure chat. Typing `run simulation` still controls execution.
 - The current runtime uses `gpt-5.4-mini` for the update, conversation, and response agents.
 - The timeout for waiting on simulation results is currently 300 seconds.
 - This project assumes the `.spp` model is configured to read `model_parameters.json` and write `model_results.json` during execution.

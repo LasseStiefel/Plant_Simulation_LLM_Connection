@@ -104,8 +104,13 @@ conversation_agent = Agent(
         "change based on its description and format. "
         "If the user has updated values, acknowledge the new pending values. "
         "Do not say the simulation has run unless simulation results are explicitly provided. "
-        "When helpful, remind the user to say 'run simulation' to start the model. "
-        "Reply briefly and clearly."
+        "Use natural conversational prose. "
+        "Prefer 1 to 3 short sentences for simple questions. "
+        "Do not use markdown bullets, bold text, or headings unless the user explicitly asks for a list. "
+        "If the user asks about one parameter, answer only that question directly. "
+        "Only mention current pending values when the user asks for them or when a value changed in this turn. "
+        "Only mention 'run simulation' when it is relevant, such as after the user changes a value or asks how to start the model. "
+        "Reply briefly, clearly, and naturally."
     ),
     model="gpt-5.4-mini",
 )
@@ -219,6 +224,34 @@ def build_plant_parameter_payload(parameter_mapping: dict) -> dict:
     return plant_parameters
 
 
+def _format_updates_for_prompt(candidate_mapping: dict, parameter_mapping: dict) -> str:
+    updates = []
+    for candidate_definition in candidate_mapping.get("updates", []):
+        if not isinstance(candidate_definition, dict):
+            continue
+
+        parameter_name = candidate_definition.get("name")
+        if parameter_name not in parameter_mapping:
+            continue
+
+        value = _coerce_value(
+            candidate_definition.get("value"),
+            parameter_mapping[parameter_name].get("value"),
+        )
+        updates.append(
+            {
+                "name": parameter_name,
+                "value": value,
+                "format": parameter_mapping[parameter_name].get("format"),
+            }
+        )
+
+    if not updates:
+        return "No values were changed in this turn."
+
+    return json.dumps(updates, indent=4)
+
+
 def _format_conversation_history(conversation_history: list[dict[str, str]], limit: int = 8) -> str:
     if not conversation_history:
         return "No previous conversation."
@@ -292,9 +325,10 @@ async def main() -> str:
 
         print("Calling Agent")
         edit_result = await Runner.run(agent, edit_prompt)
+        edit_output = edit_result.final_output.model_dump()
         pending_mapping = normalize_parameter_mapping(
             pending_mapping,
-            edit_result.final_output.model_dump(),
+            edit_output,
         )
 
         if _should_run_simulation(user_prompt):
@@ -321,9 +355,10 @@ async def main() -> str:
             conversation_prompt = (
                 f"Recent conversation:\n{recent_history}\n\n"
                 f"Current pending parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
+                f"Applied updates in this turn:\n{_format_updates_for_prompt(edit_output, pending_mapping)}\n\n"
                 f"Latest user request:\n{user_prompt}\n\n"
-                "Answer the user. If values were updated in this turn, mention the new pending "
-                "values. If the user wants to start the model, tell them to say 'run simulation'."
+                "Answer the user naturally. If values were updated in this turn, mention only the "
+                "relevant new values. If no values were updated, just answer the question directly."
             )
 
             response_result = await Runner.run(conversation_agent, conversation_prompt)

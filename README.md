@@ -1,33 +1,60 @@
 # Plant Simulation LLM Connection
 
-This project connects a Siemens Plant Simulation model to a natural-language interface powered by OpenAI. A user describes desired simulation changes in plain English, the Python app converts that request into structured parameters, launches the Plant Simulation model, waits for the simulation to finish, and returns a short language summary of the result.
+This project connects a Siemens Plant Simulation model to a natural-language interface powered by OpenAI. You can chat with the assistant about which parameters exist, inspect their current values, stage changes in conversation, and only start the simulation when you explicitly tell it to run.
 
 ## What The Project Does
 
-The current implementation supports a simple end-to-end loop:
+The current implementation supports a staged conversational workflow:
 
-1. Read the latest input values from `plant_inputs.json`.
-2. Ask an OpenAI agent to update `Store1ProcTime` and `Store2ProcTime` from a user prompt.
-3. Save the updated values to JSON.
-4. Launch `autoexecute_test.spp` in Siemens Plant Simulation.
-5. Wait for the simulation to write results to `model_results.json`.
-6. Ask a second OpenAI agent to summarize the result and mention `line_output`.
+1. Load parameter definitions from `parameter_mapping.json`.
+2. Load the latest active plant values from `model_parameters.json` if they exist.
+3. Let the user ask questions such as what can be changed or what the current value is.
+4. Let the user stage parameter changes in plain English without immediately launching the model.
+5. Start Plant Simulation only when the user gives an explicit run instruction such as `run simulation`.
+6. Wait for the simulation to write `model_results.json`.
+7. Return a short language summary of the result that mentions `line_output`.
 
 ## Current Inputs And Outputs
 
-### Inputs
+### Parameter Definition Input
 
-The active Python flow currently exposes two integer parameters:
+`parameter_mapping.json` is the source of truth for editable parameters. Each parameter entry contains:
 
-- `Store1ProcTime`
-- `Store2ProcTime`
+- `description`: human-readable explanation of the parameter
+- `route`: the Plant Simulation route for the variable
+- `format`: guidance for what kind of value the LLM should write
+- `value`: the default value used when no prior saved value exists
 
-These are stored in:
+Example shape:
 
-- `plant_inputs.json`: latest user-facing values
-- `model_parameters.json`: values written immediately before launching the simulation
+```json
+{
+    "Station1ProcTime": {
+        "description": "Processing Time of Station 1 in seconds",
+        "route": "root.Station1.ProcTime",
+        "format": "seconds integer",
+        "value": 60
+    }
+}
+```
 
-### Output
+### Plant Runtime Input
+
+`model_parameters.json` is the simple payload consumed by the Plant Simulation side. It is written only when the user explicitly starts the simulation.
+
+Current format:
+
+```json
+{
+    "root.Station1.ProcTime": 60,
+    "root.Station2.ProcTime": 60,
+    "root.AssemblyStation.ProcTime": 60,
+    "root.Station3.ProcTime": 60,
+    "root.Station3.YDim": 2
+}
+```
+
+### Simulation Output
 
 The expected simulation result is written to:
 
@@ -39,14 +66,15 @@ The sample result currently included in the repository is:
 
 ## Project Structure
 
-- `agent.py`: main entry point; handles user input, agent calls, JSON updates, and waiting for simulation output
+- `agent.py`: main entry point; handles conversation, staged updates, simulation launch, and result summarization
 - `model_handling.py`: writes model parameters, launches Plant Simulation, and stores simulation results
-- `autoexecute_test.spp`: Siemens Plant Simulation model
-- `autoexecute_test.spp.bak`: backup copy of the Plant Simulation model
-- `plant_inputs.json`: latest requested inputs
-- `model_parameters.json`: parameters consumed by the simulation
+- `parameter_mapping.json`: parameter definitions used as the LLM's editable-parameter context
+- `model_parameters.json`: route-to-value payload written immediately before a simulation run
 - `model_results.json`: latest simulation result
-- `parameter_mapping`: reference mapping for a broader parameter set
+- `LLM_Model_V2.spp`: Siemens Plant Simulation model currently launched by Python
+- `autoexecute_test.spp`: older Plant Simulation model file still present in the repository
+- `autoexecute_test.spp.bak`: backup copy of the older Plant Simulation model
+- `plant_inputs.json`: legacy file from the earlier prototype flow; no longer used by the current runtime
 
 ## Requirements
 
@@ -94,7 +122,7 @@ OPENAI_API_KEY=your_api_key_here
 From the project root:
 
 ```powershell
-.\.venv\Scripts\python agent.py
+.\.venv\Scripts\python.exe agent.py
 ```
 
 You will be prompted with:
@@ -103,44 +131,109 @@ You will be prompted with:
 Ask for simulation inputs:
 ```
 
-Example prompts:
+The session stays open until you type `exit`, `quit`, or `bye`.
 
-- `Set both stores to 6 seconds`
-- `Make store 1 take 45 seconds and keep the other unchanged`
-- `Change store 2 to 30`
+## Example Conversation
+
+You can ask informational questions first:
+
+- `what can I change?`
+- `what is the current value of station 1?`
+- `what does Station3YDim mean?`
+
+You can stage changes without running:
+
+- `set station 1 processing time to 45 seconds`
+- `change station 3 capacity to 4`
+- `set assembly station processing time to 80`
+
+You can update and run in one message:
+
+- `set station 1 to 45 and run simulation`
+
+Or run later after several staged updates:
+
+- `run simulation`
+
+Questions such as `can we run simulation?` do not start the model. The simulation is only launched on explicit run instructions.
 
 ## Runtime Flow
 
-### 1. Input interpretation
+### 1. Pending state initialization
 
-`agent.py` uses an OpenAI agent with a structured `PlantInputs` schema to extract integer values for:
+`agent.py` reads `parameter_mapping.json` and builds the current pending parameter state.
 
-- `Store1ProcTime`
-- `Store2ProcTime`
+If `model_parameters.json` already exists, the pending state is initialized from those saved plant values so the conversation starts from the latest active settings rather than only the defaults.
 
-If the user only mentions one value, the agent is instructed to keep the other one unchanged.
+### 2. Update extraction
 
-### 2. Simulation launch
+An OpenAI agent reads:
+
+- the recent conversation
+- the current pending parameter mapping
+- the latest user message
+
+It returns a simple structured response of the form:
+
+```json
+{
+    "updates": [
+        {
+            "name": "Station1ProcTime",
+            "value": 45
+        }
+    ]
+}
+```
+
+Python then applies those updates onto the pending parameter mapping and keeps all route, description, and format metadata from `parameter_mapping.json`.
+
+### 3. Conversational guidance
+
+A second conversational agent can answer questions about:
+
+- which parameters can be changed
+- what their current pending values are
+- what a parameter means based on `description`
+- what type of value is expected based on `format`
+
+This allows a normal back-and-forth chat before running the model.
+
+### 4. Plant payload creation
+
+When the user gives an explicit run instruction, Python converts the pending mapping into a simple plant-facing payload:
+
+```json
+{
+    "root.Station1.ProcTime": 45,
+    "root.Station2.ProcTime": 60
+}
+```
+
+That route-to-value payload is written to `model_parameters.json`.
+
+### 5. Simulation launch
 
 `model_handling._open_model()`:
 
-- writes the updated parameters to `model_parameters.json`
+- writes the plant payload to `model_parameters.json`
 - deletes any stale `model_results.json`
-- launches `autoexecute_test.spp` with Plant Simulation
+- launches `LLM_Model_V2.spp` with Plant Simulation
 
-### 3. Result collection
+### 6. Result collection
 
 `agent.py` waits up to 300 seconds for `model_results.json` to appear and contain valid JSON.
 
-### 4. User-facing response
+### 7. User-facing response
 
-A second OpenAI agent reads the simulation results and returns a short explanation that includes `line_output`.
+A response agent reads the simulation results and returns a short explanation that includes `line_output`.
 
 ## Important Notes
 
-- The current runtime code only uses `Store1ProcTime` and `Store2ProcTime`.
-- The `parameter_mapping` file describes a larger set of possible model parameters, but it is not currently used by `agent.py` or `model_handling.py`.
-- The two OpenAI agents in `agent.py` are both configured to use `gpt-5.4-mini`.
+- `parameter_mapping.json` is the LLM-facing source of truth for parameter names, descriptions, formats, and default values.
+- `model_parameters.json` is the Plant Simulation-facing payload and currently uses the shape `{route: value}`.
+- Pending values are updated during the conversation, but `model_parameters.json` is only rewritten when the user explicitly starts a simulation run.
+- The current runtime uses `gpt-5.4-mini` for the update, conversation, and response agents.
 - The timeout for waiting on simulation results is currently 300 seconds.
 - This project assumes the `.spp` model is configured to read `model_parameters.json` and write `model_results.json` during execution.
 
@@ -148,16 +241,17 @@ A second OpenAI agent reads the simulation results and returns a short explanati
 
 This repository is useful as a lightweight prototype for:
 
-- translating natural-language user requests into simulation inputs
-- automating Plant Simulation launches from Python
+- translating natural-language requests into simulation parameter changes
+- discussing editable simulation parameters before committing a run
+- staging several changes across a short conversation
+- launching Plant Simulation from Python only on explicit user instruction
 - returning simulation outcomes in plain language
-- experimenting with LLM-guided manufacturing or process simulation workflows
 
 ## Possible Next Improvements
 
-- add a `requirements.txt` or `pyproject.toml`
-- expose more simulation parameters through the structured schema
-- validate user inputs before launching the model
-- log simulation runs and results
+- add `requirements.txt` or `pyproject.toml`
+- persist staged conversation state across restarts
+- add validation rules beyond simple type coercion
 - make the Plant Simulation executable path configurable
-- add tests around JSON handling and timeout behavior
+- log simulation runs and staged parameter changes
+- add tests around command detection, JSON handling, and timeout behavior

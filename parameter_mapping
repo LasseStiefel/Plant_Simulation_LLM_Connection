@@ -1,0 +1,32 @@
+{
+    "Station1ProcTime":{
+        "description": "Processing Time of Station 1 in seconds",
+        "route": "root.Station1.ProcTime",
+        "format": "seconds integer",
+        "value": 60
+    },
+    "Station2ProcTime":{
+        "description": "Processing Time of Station 2 in seconds",
+        "route": "root.Station2.ProcTime",
+        "format": "seconds integer",
+        "value": 60
+    },
+    "Station3ProcTime":{
+        "description": "Processing Time of Station 3 in seconds",
+        "route": "root.Station3.ProcTime",
+        "format": "seconds integer",
+        "value": 60
+    },
+    "Station3YDim":{
+        "description": "Station 3 processing capacity in components",
+        "route": "root.Station3.YDim",
+        "format": "components integer",
+        "value": 2
+    },
+    "Station3ProcTimeType":{
+        "description": "Processing Time Type of Station 3",
+        "route": "root.Station3.ProcTime.Type",
+        "format": "string",
+        "value": "60"
+    }
+}

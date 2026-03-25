@@ -1,7 +1,7 @@
 {
-    "root.Station1.ProcTime": 100,
-    "root.Station2.ProcTime": 100,
-    "root.AssemblyStation.ProcTime": 100,
-    "root.Station3.ProcTime": 100,
-    "root.Station3.YDim": 15
+    "root.Station1.ProcTime": 20,
+    "root.Station2.ProcTime": 10,
+    "root.AssemblyStation.ProcTime": 20,
+    "root.Station3.ProcTime": 40,
+    "root.Station3.YDim": 4
 }

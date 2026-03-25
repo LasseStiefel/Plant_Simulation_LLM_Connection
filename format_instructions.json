@@ -1,7 +1,7 @@
 {
     "time":{
         "format": "seconds as string",
-        "instruction": "dependant on what proctimetype is selected, time can have differnet formats. As a default value, if no proctimetype for the corresponding station is availble, choose {const}",
+        "instruction": "Dependant on what timetype for the station is selected. Output shows the output with same index as inoutput of timetype class. As a default value, if no timetype for the station is availble, choose the first output const.",
         "output": [["60"],["60,70,80"],["5"]],
         "dependant_variable":[["const"],["Tiangle"],["Poisson"]]
     },
@@ -9,5 +9,10 @@
         "format": "time format as string", 
         "instruction": "Defines what distribution the processing time of the station follows. Output exactly as string listed in output.",
         "output":[["Const"],["Traingle"],["Poisson"]]
-    } 
+    },
+    "machinecapacity":{
+        "format":"amount as integer",
+        "instruction": "Capacity of a parallelstation. 1 = 1 part at once, 3 = 3 parts at once and so on.",
+        "output": 2
+    }
 }

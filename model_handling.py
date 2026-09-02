@@ -2,22 +2,29 @@ import json
 from pathlib import Path
 
 import subprocess
+from session import build_plant_parameter_payload, load_optional_json_object, load_parameter_mapping
 
 BASE_DIR = Path(__file__).resolve().parent
 program = r"C:\Program Files\Siemens\Tecnomatix Plant Simulation 2504\PlantSimulation.exe"
-file_path = BASE_DIR / "autoexecute_test.spp"
+file_path = BASE_DIR / "LLM_Model_V2.spp"
 
-
-
+PARAMETER_MAPPING_PATH = BASE_DIR / "parameter_mapping.json"
+FORMAT_INSTRUCTIONS_PATH = BASE_DIR / "format_instructions.json"
 PARAMETERS_PATH = BASE_DIR / "model_parameters.json"
 RESULTS_PATH = BASE_DIR / "model_results.json"
 
 _ACTIVE_WAITER = None
 
+
 def _default_state():
-    return{
-        "Store1ProcTime": 60,
-        "Store2ProcTime": 60
+    if PARAMETER_MAPPING_PATH.is_file():
+        format_instructions = load_optional_json_object(FORMAT_INSTRUCTIONS_PATH)
+        parameter_mapping = load_parameter_mapping(PARAMETER_MAPPING_PATH)
+        return build_plant_parameter_payload(parameter_mapping, format_instructions)
+
+    return {
+        "root.Store1ProcTime": 60,
+        "root.Store2ProcTime": 60,
     }
 
 def _save_parameters(parameters: dict) -> None:
@@ -32,13 +39,10 @@ def _load_parameters() -> dict:
 
     return parameters
 
-
-def _get_param() -> int: #dict
+def _get_param() -> dict: #dict
     parameters = _load_parameters()
-    Store1ProcTime = parameters["Store1ProcTime"]
-    Store2ProcTime = parameters["Store2ProcTime"]
 
-    return Store1ProcTime, Store2ProcTime
+    return parameters
 
 def _open_model(updated_json: dict, waiter=None) -> None:
     global _ACTIVE_WAITER
@@ -50,8 +54,6 @@ def _open_model(updated_json: dict, waiter=None) -> None:
 
     # Open Model
     subprocess.Popen([program, str(file_path)])
-    
-
 
 def _send_sim_results(simulation_results: dict) -> None:
     global _ACTIVE_WAITER
@@ -62,4 +64,3 @@ def _send_sim_results(simulation_results: dict) -> None:
         _ACTIVE_WAITER.results = simulation_results
         _ACTIVE_WAITER.done.set()
         _ACTIVE_WAITER = None
-

@@ -1,0 +1,22 @@
+{
+    "time":{
+        "format": "seconds as string",
+        "instruction": "You have to use the timetype correspondant to the station if a timetype parameter for the same station exist. In the output list below entry 1 corresponds to const in timetype which is also entry 1. The seperate entries should be treated as one parameter each. So if timtype of the station is Poisson, you and the user can configure the lambda value. your output to model parameters should then be root.station.proctime.lambda : lambda. For Triangle the outut should be three of those outputs for a,b,c speratly. If outputs is empty use the default route for the station.",
+        "output": [[""],["a","b","c"],["Lambda"]]
+    },
+    "timetype":{
+        "format": "time format as string", 
+        "instruction": "Defines what distribution the processing time of the station follows. Output exactly as string listed in output.",
+        "output":[["Const"],["Triangle"],["Poisson"]]
+    },
+    "machinecapacity":{
+        "format":"amount as integer",
+        "instruction": "Capacity of a parallelstation. 1 = 1 part at once, 3 = 3 parts at once and so on.",
+        "output": 2
+    },
+    "boolean":{
+        "format":"boolean",
+        "instruction": "Simple Boolean output. True or False",
+        "output": true
+    }
+}

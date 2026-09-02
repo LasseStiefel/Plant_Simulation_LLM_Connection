@@ -1,4 +1,8 @@
 {
-    "Store1ProcTime": 6,
-    "Store2ProcTime": 6
+    "root.Station1.ProcTime": 30,
+    "root.Station2.ProcTime": 10,
+    "root.AssemblyStation.ProcTime": 20,
+    "root.Station3.ProcTime": 20,
+    "root.Station3.YDim": 4,
+    "root.Station3.StartProcessingWhenFull": true
 }

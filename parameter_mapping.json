@@ -1,32 +1,38 @@
 {
-    "Station1ProcTime":{
+    "Station1ProcTime": {
         "description": "Processing Time of Station 1 in seconds",
         "route": "root.Station1.ProcTime",
-        "format": "time"
+        "format": "time",
+        "default": 10
     },
-    "Station2ProcTime":{
+    "Station2ProcTime": {
         "description": "Processing Time of Station 2 in seconds",
         "route": "root.Station2.ProcTime",
-        "format": "time"
+        "format": "time",
+        "default": 43
     },
-    "AssemblyStationProcTime":{
+    "AssemblyStationProcTime": {
         "description": "Processing Time of Assembly Station in seconds",
         "route": "root.AssemblyStation.ProcTime",
-        "format": "time"
+        "format": "time",
+        "default": 22
     },
-    "Station3ProcTime":{
+    "Station3ProcTime": {
         "description": "Processing Time of Station 3 in seconds",
         "route": "root.Station3.ProcTime",
-        "format": "time"
+        "format": "time",
+        "default": 30
     },
-    "Station3YDim":{
+    "Station3YDim": {
         "description": "Station 3 processing capacity in components",
         "route": "root.Station3.YDim",
-        "format": "machinecapacity"
-    }, 
-    "Station3ProcTimeType":{
-        "description": "Station 3 processing time distribution",
-        "route": "root.Station3.procTimeType",
-        "format": "timetype"
+        "format": "machinecapacity",
+        "default": 2
+    },
+    "Station3StartWhenFull": {
+        "description": "Station 3 processing starts when full or can also run parts in parallel",
+        "route": "root.Station3.StartProcessingWhenFull",
+        "format": "boolean",
+        "default": true
     }
 }

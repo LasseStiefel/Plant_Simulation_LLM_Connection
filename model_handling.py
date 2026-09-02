@@ -2,34 +2,25 @@ import json
 from pathlib import Path
 
 import subprocess
+from session import build_plant_parameter_payload, load_optional_json_object, load_parameter_mapping
 
 BASE_DIR = Path(__file__).resolve().parent
 program = r"C:\Program Files\Siemens\Tecnomatix Plant Simulation 2504\PlantSimulation.exe"
 file_path = BASE_DIR / "LLM_Model_V2.spp"
 
 PARAMETER_MAPPING_PATH = BASE_DIR / "parameter_mapping.json"
+FORMAT_INSTRUCTIONS_PATH = BASE_DIR / "format_instructions.json"
 PARAMETERS_PATH = BASE_DIR / "model_parameters.json"
 RESULTS_PATH = BASE_DIR / "model_results.json"
 
 _ACTIVE_WAITER = None
 
-def _mapping_to_plant_payload(parameter_mapping: dict) -> dict:
-    plant_parameters = {}
-
-    for parameter_definition in parameter_mapping.values():
-        route = parameter_definition.get("route")
-        if not route:
-            continue
-
-        plant_parameters[route] = parameter_definition.get("value")
-
-    return plant_parameters
-
 
 def _default_state():
     if PARAMETER_MAPPING_PATH.is_file():
-        with PARAMETER_MAPPING_PATH.open("r", encoding="utf-8") as f:
-            return _mapping_to_plant_payload(json.load(f))
+        format_instructions = load_optional_json_object(FORMAT_INSTRUCTIONS_PATH)
+        parameter_mapping = load_parameter_mapping(PARAMETER_MAPPING_PATH)
+        return build_plant_parameter_payload(parameter_mapping, format_instructions)
 
     return {
         "root.Store1ProcTime": 60,

@@ -2,24 +2,38 @@ import asyncio
 import json
 from pathlib import Path
 
-from agents import Agent, Runner
+from agents import Agent, AgentOutputSchema, Runner
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from model_handling import PARAMETERS_PATH, RESULTS_PATH, _open_model
-from session import JsonScalar, PlantSimulationSession, format_conversation_history
+from session import (
+    JsonValue,
+    PlantSimulationSession,
+    build_parameter_context_for_llm,
+    format_conversation_history,
+    load_optional_json_object,
+)
 
 load_dotenv()
 
 
 BASE_DIR = Path(__file__).resolve().parent
 PARAMETER_MAPPING_FILE = BASE_DIR / "parameter_mapping.json"
+FORMAT_INSTRUCTIONS_FILE = BASE_DIR / "format_instructions.json"
+GENERAL_KNOWLEDGE_FILE = BASE_DIR / "general_knowledge.json"
 SIMULATION_TIMEOUT_SECONDS = 300
 
 
 class ParameterValueUpdate(BaseModel):
     name: str = Field(description="Exact parameter name from the mapping JSON")
-    value: JsonScalar = Field(description="The new staged value for that parameter")
+    value: JsonValue = Field(
+        description=(
+            "The new staged value for that parameter. Use a scalar for normal direct-route "
+            "parameters. Use an object of component names to scalar values for component-based "
+            "time parameters."
+        )
+    )
 
 
 class TurnResponse(BaseModel):
@@ -37,13 +51,18 @@ turn_agent = Agent(
     name="Plant Simulation Turn Agent",
     instructions=(
         "You are helping a user configure a Siemens Plant Simulation model through chat. "
-        "You will receive recent conversation, the current pending parameter mapping, the latest user message, and optionally the most recent simulation context. "
-        "Each parameter in the mapping includes description, format, route, and current value. "
+        "You will receive recent conversation, general knowledge, format instructions, the current pending parameter mapping, the latest user message, and optionally the most recent simulation context. "
+        "Each parameter in the mapping includes description, format, route, current value, and may include format-specific guidance. "
         "Use this information to answer questions naturally, stage value changes, answer questions about the most recent simulation result when context is provided, and decide whether the simulation should run now. "
         "Return three things: reply, updates, and should_run. "
         "Write reply in plain natural prose and keep it brief for simple questions. "
         "Only include parameters in updates when their value should change in this turn. "
         "Use the exact parameter names from the mapping JSON. "
+        "Never return null for a parameter value. If the user has not specified a value yet, keep the current value or use the mapping default instead of null. "
+        "For normal direct-route parameters, set value as a scalar. "
+        "For time parameters, if the selected timetype requires component routes, set value as an object whose keys are the component names shown in the parameter context. "
+        "If a time parameter uses the default direct route, set value as a scalar instead of an object. "
+        "When a user changes a timetype, keep the paired time parameter consistent with that timetype. "
         "Set should_run to true only when the user clearly wants to start the simulation now or is clearly done configuring and asking to proceed. "
         "Do not run the simulation on every user input. "
         "If you are unsure whether they want to run now, ask them directly in reply and set should_run to false. "
@@ -51,7 +70,7 @@ turn_agent = Agent(
         "When the user asks about the most recent simulation result, answer from that context if it is provided. "
         "Avoid markdown-heavy formatting for simple answers."
     ),
-    output_type=TurnResponse,
+    output_type=AgentOutputSchema(TurnResponse, strict_json_schema=False),
     model="gpt-5.4-mini",
 )
 
@@ -76,9 +95,14 @@ async def run_turn_agent(
     user_prompt: str,
     last_simulation_context: dict | None,
 ) -> dict:
+    format_instructions = load_optional_json_object(FORMAT_INSTRUCTIONS_FILE)
+    general_knowledge = load_optional_json_object(GENERAL_KNOWLEDGE_FILE)
+    prompt_mapping = build_parameter_context_for_llm(pending_mapping, format_instructions)
     prompt = (
         f"Recent conversation:\n{format_conversation_history(conversation_history)}\n\n"
-        f"Current pending parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
+        f"General knowledge:\n{json.dumps(general_knowledge, indent=4)}\n\n"
+        f"Format instructions:\n{json.dumps(format_instructions, indent=4)}\n\n"
+        f"Current pending parameter mapping:\n{json.dumps(prompt_mapping, indent=4)}\n\n"
         f"Most recent simulation context:\n{json.dumps(last_simulation_context, indent=4) if last_simulation_context else 'None'}\n\n"
         f"Latest user request:\n{user_prompt}"
     )
@@ -94,8 +118,10 @@ async def summarize_results(
     results: dict,
     initial_reply: str,
 ) -> str:
+    general_knowledge = load_optional_json_object(GENERAL_KNOWLEDGE_FILE)
     prompt = (
         f"Recent conversation:\n{format_conversation_history(conversation_history)}\n\n"
+        f"General knowledge:\n{json.dumps(general_knowledge, indent=4)}\n\n"
         f"User request:\n{user_prompt}\n\n"
         f"Assistant reply before running:\n{initial_reply}\n\n"
         f"Updated parameter mapping:\n{json.dumps(pending_mapping, indent=4)}\n\n"
@@ -113,6 +139,7 @@ def create_session() -> PlantSimulationSession:
         results_path=RESULTS_PATH,
         open_model=_open_model,
         run_turn=run_turn_agent,
+        format_instructions_path=FORMAT_INSTRUCTIONS_FILE,
         summarize_results=summarize_results,
         timeout_seconds=SIMULATION_TIMEOUT_SECONDS,
     )

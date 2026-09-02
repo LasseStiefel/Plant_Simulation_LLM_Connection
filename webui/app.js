@@ -22,6 +22,18 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;");
 }
 
+function formatParameterValue(value) {
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+
+  return String(value);
+}
+
 function setDrawerOpen(isOpen) {
   bodyEl.classList.toggle("drawer-open", isOpen);
   variablesToggleEl.setAttribute("aria-expanded", String(isOpen));
@@ -66,15 +78,14 @@ function renderPendingMapping(pendingMapping) {
   }
 
   parameterListEl.innerHTML = entries
-    .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
     .map(([name, definition]) => {
-      const value = definition?.value ?? "N/A";
+      const value = formatParameterValue(definition?.value);
       const description = definition?.description ?? "";
       const format = definition?.format ?? "";
       return `
         <article class="parameter-card">
           <h3>${escapeHtml(name)}</h3>
-          <p class="parameter-value">${escapeHtml(String(value))}</p>
+          <p class="parameter-value">${escapeHtml(value)}</p>
           <p class="parameter-description">${escapeHtml(description)}</p>
           <p class="parameter-format">Format: ${escapeHtml(format)}</p>
         </article>
